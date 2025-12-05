@@ -347,8 +347,8 @@ app.get('/api/auth/facebook', (req, res) => {
   authUrl.searchParams.set('client_id', META_APP.appId);
   authUrl.searchParams.set('redirect_uri', META_APP.redirectUri);
   authUrl.searchParams.set('state', state);
-  // Use basic permissions for development (pages_manage_posts requires App Review)
-  authUrl.searchParams.set('scope', 'public_profile,email');
+  // Use only public_profile for development (email requires App Review)
+  authUrl.searchParams.set('scope', 'public_profile');
   
   console.log(`🔗 Facebook OAuth started for user: ${userId}`);
   res.redirect(authUrl.toString());
@@ -430,8 +430,8 @@ app.get('/api/auth/instagram', (req, res) => {
   authUrl.searchParams.set('client_id', META_APP.appId);
   authUrl.searchParams.set('redirect_uri', `http://localhost:${PORT}/api/auth/instagram/callback`);
   authUrl.searchParams.set('state', state);
-  // Use basic permissions for development (instagram_content_publish requires App Review)
-  authUrl.searchParams.set('scope', 'public_profile,email');
+  // Use only public_profile for development (email requires App Review)
+  authUrl.searchParams.set('scope', 'public_profile');
   
   console.log(`🔗 Instagram OAuth started for user: ${userId}`);
   res.redirect(authUrl.toString());
