@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+server/node_modules/
+
+# Build output
+dist/
+build/
+
+# Environment files
+.env
+.env.local
+.env.production
+server/.env
+server/.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Cache
+.cache/
+.parcel-cache/
+
+# Large video files (optional - uncomment if you don't want to track)
+# *.mp4
+
+# Temporary files
+*.tmp
+*.temp
+
