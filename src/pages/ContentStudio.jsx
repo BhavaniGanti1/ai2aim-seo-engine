@@ -99,6 +99,24 @@ function ContentStudio() {
       })
       // Refresh connections
       loadConnections()
+      
+      // Restore saved content after OAuth redirect
+      const savedContent = localStorage.getItem('ai2aim_pending_content')
+      const savedPlatforms = localStorage.getItem('ai2aim_selected_platforms')
+      if (savedContent) {
+        setGeneratedContent(JSON.parse(savedContent))
+        setSelectedIdea({ title: JSON.parse(savedContent).title, category: 'Restored' })
+        localStorage.removeItem('ai2aim_pending_content')
+      }
+      if (savedPlatforms) {
+        const platforms = JSON.parse(savedPlatforms)
+        if (!platforms.includes(connected)) {
+          platforms.push(connected)
+        }
+        setSelectedPlatforms(platforms)
+        localStorage.removeItem('ai2aim_selected_platforms')
+      }
+      
       // Clear URL params
       setSearchParams({})
     }
@@ -108,6 +126,13 @@ function ContentStudio() {
         type: 'error',
         message: `Connection failed: ${error}`
       })
+      // Restore content even on error
+      const savedContent = localStorage.getItem('ai2aim_pending_content')
+      if (savedContent) {
+        setGeneratedContent(JSON.parse(savedContent))
+        setSelectedIdea({ title: JSON.parse(savedContent).title, category: 'Restored' })
+        localStorage.removeItem('ai2aim_pending_content')
+      }
       setSearchParams({})
     }
   }, [searchParams, setSearchParams])
@@ -156,6 +181,11 @@ function ContentStudio() {
 
   const handleConnect = (platform) => {
     setConnectingPlatform(platform)
+    // Save generated content to localStorage before OAuth redirect
+    if (generatedContent) {
+      localStorage.setItem('ai2aim_pending_content', JSON.stringify(generatedContent))
+      localStorage.setItem('ai2aim_selected_platforms', JSON.stringify(selectedPlatforms))
+    }
     connectPlatform(platform)
   }
 
