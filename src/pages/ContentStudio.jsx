@@ -87,6 +87,7 @@ function ContentStudio() {
   const [notification, setNotification] = useState(null)
   const [videoStatus, setVideoStatus] = useState(null) // { status: 'idle' | 'generating' | 'ready' | 'error', videoId, videoUrl }
   const [isGeneratingVideo, setIsGeneratingVideo] = useState(false)
+  const [showYouTubeModal, setShowYouTubeModal] = useState(false)
 
   // Check for OAuth callback params
   useEffect(() => {
@@ -336,6 +337,12 @@ function ContentStudio() {
       return
     }
 
+    // For YouTube, show the video generation modal
+    if (platformId === 'youtube' && generatedContent) {
+      setShowYouTubeModal(true)
+      return
+    }
+
     // Clear previous results for this platform
     setPublishResults(prev => {
       const newResults = { ...prev }
@@ -348,6 +355,104 @@ function ContentStudio() {
         ? prev.filter(id => id !== platformId)
         : [...prev, platformId]
     )
+  }
+
+  // Handle YouTube video generation and posting
+  const handleYouTubePost = async () => {
+    setShowYouTubeModal(false)
+    setIsGeneratingVideo(true)
+    setNotification({ type: 'success', message: '🎬 Generating AI video... This may take 1-2 minutes' })
+    
+    try {
+      const userId = localStorage.getItem('ai2aim_user') 
+        ? JSON.parse(localStorage.getItem('ai2aim_user')).id 
+        : 'demo_user'
+      
+      // Step 1: Generate video with HeyGen
+      const generateResponse = await fetch('http://localhost:4000/api/heygen/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId,
+          content: generatedContent.content,
+        }),
+      })
+      
+      const generateData = await generateResponse.json()
+      
+      if (!generateData.success) {
+        throw new Error(generateData.error || 'Failed to generate video')
+      }
+      
+      // Step 2: Poll for video completion
+      const videoUrl = await waitForVideo(generateData.videoId)
+      
+      if (!videoUrl) {
+        throw new Error('Video generation timed out')
+      }
+      
+      setNotification({ type: 'success', message: '🎬 Video ready! Uploading to YouTube...' })
+      
+      // Step 3: Upload to YouTube
+      const uploadResponse = await fetch('http://localhost:4000/api/post/youtube', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId,
+          videoUrl,
+          title: generatedContent.title,
+          description: generatedContent.content,
+        }),
+      })
+      
+      const uploadData = await uploadResponse.json()
+      
+      if (uploadData.success) {
+        setPublishResults(prev => ({
+          ...prev,
+          youtube: { success: true, ...uploadData }
+        }))
+        setNotification({ type: 'success', message: '🎉 Video posted to YouTube successfully!' })
+      } else {
+        throw new Error(uploadData.error || 'Failed to upload to YouTube')
+      }
+      
+    } catch (error) {
+      setNotification({ type: 'error', message: `YouTube post failed: ${error.message}` })
+      setPublishResults(prev => ({
+        ...prev,
+        youtube: { success: false, error: error.message }
+      }))
+    }
+    
+    setIsGeneratingVideo(false)
+  }
+
+  // Wait for HeyGen video to complete
+  const waitForVideo = async (videoId) => {
+    const maxAttempts = 60 // 5 minutes
+    let attempts = 0
+    
+    while (attempts < maxAttempts) {
+      await new Promise(resolve => setTimeout(resolve, 5000)) // Wait 5 seconds
+      
+      try {
+        const response = await fetch(`http://localhost:4000/api/heygen/status/${videoId}`)
+        const data = await response.json()
+        
+        if (data.status === 'completed' && data.videoUrl) {
+          return data.videoUrl
+        } else if (data.status === 'failed') {
+          throw new Error('Video generation failed')
+        }
+      } catch (error) {
+        console.error('Status check error:', error)
+      }
+      
+      attempts++
+    }
+    
+    return null
   }
 
   const handlePublish = async () => {
@@ -494,6 +599,66 @@ function ContentStudio() {
                 <X className="w-4 h-4" />
               </button>
             </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* YouTube Video Generation Modal */}
+      <AnimatePresence>
+        {showYouTubeModal && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-void/90 backdrop-blur-xl"
+            onClick={() => setShowYouTubeModal(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="bg-obsidian border border-slate-dark rounded-2xl p-6 max-w-md w-full"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center gap-3 mb-4">
+                <div className="p-3 rounded-xl bg-red-500/20">
+                  <Youtube className="w-8 h-8 text-red-500" />
+                </div>
+                <div>
+                  <h3 className="text-xl font-bold text-white">Post to YouTube</h3>
+                  <p className="text-gray-400 text-sm">Generate AI video & upload</p>
+                </div>
+              </div>
+              
+              <p className="text-gray-300 mb-6">
+                Would you like to generate a <span className="text-neon-cyan font-semibold">20-second AI video</span> using HeyGen and post it to your YouTube channel?
+              </p>
+              
+              <div className="bg-slate-dark/50 rounded-xl p-4 mb-6">
+                <p className="text-sm text-gray-400 mb-2">Video will be created from:</p>
+                <p className="text-white text-sm line-clamp-3">{generatedContent?.content?.substring(0, 150)}...</p>
+              </div>
+              
+              <div className="flex gap-3">
+                <button
+                  onClick={() => setShowYouTubeModal(false)}
+                  className="flex-1 py-3 bg-slate-dark rounded-xl text-gray-300 font-semibold hover:bg-slate-dark/70"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleYouTubePost}
+                  disabled={isGeneratingVideo}
+                  className="flex-1 py-3 bg-gradient-to-r from-red-500 to-red-600 rounded-xl text-white font-semibold flex items-center justify-center gap-2 disabled:opacity-50"
+                >
+                  {isGeneratingVideo ? (
+                    <><Loader2 className="w-4 h-4 animate-spin" />Processing...</>
+                  ) : (
+                    <><Youtube className="w-4 h-4" />Generate & Post</>
+                  )}
+                </button>
+              </div>
+            </motion.div>
           </motion.div>
         )}
       </AnimatePresence>
@@ -674,57 +839,6 @@ function ContentStudio() {
                   ))}
                 </div>
 
-                {/* Video Generation Section */}
-                <div className="mt-4 p-4 bg-gradient-to-r from-red-500/10 to-orange-500/10 border border-red-500/30 rounded-xl">
-                  <div className="flex items-center justify-between mb-3">
-                    <div className="flex items-center gap-2">
-                      <Youtube className="w-5 h-5 text-red-500" />
-                      <span className="text-white font-medium">AI Video (HeyGen)</span>
-                    </div>
-                    {videoStatus?.status === 'ready' && (
-                      <span className="text-xs text-neon-lime flex items-center gap-1">
-                        <CheckCircle className="w-3 h-3" /> Ready
-                      </span>
-                    )}
-                  </div>
-                  
-                  {!videoStatus || videoStatus.status === 'idle' || videoStatus.status === 'error' ? (
-                    <div>
-                      <p className="text-gray-400 text-sm mb-3">
-                        Generate a 20-second AI video to post on YouTube
-                      </p>
-                      <button
-                        onClick={handleGenerateVideo}
-                        disabled={isGeneratingVideo}
-                        className="w-full py-2 bg-gradient-to-r from-red-500 to-orange-500 rounded-lg text-white font-semibold text-sm disabled:opacity-50 flex items-center justify-center gap-2"
-                      >
-                        {isGeneratingVideo ? (
-                          <><Loader2 className="w-4 h-4 animate-spin" />Generating Video...</>
-                        ) : (
-                          <><Youtube className="w-4 h-4" />Generate Video with HeyGen</>
-                        )}
-                      </button>
-                      {videoStatus?.status === 'error' && (
-                        <p className="text-red-400 text-xs mt-2">{videoStatus.error}</p>
-                      )}
-                    </div>
-                  ) : videoStatus.status === 'generating' ? (
-                    <div className="text-center py-4">
-                      <Loader2 className="w-8 h-8 text-red-500 animate-spin mx-auto mb-2" />
-                      <p className="text-gray-400 text-sm">Generating video... This may take 1-2 minutes</p>
-                    </div>
-                  ) : videoStatus.status === 'ready' ? (
-                    <div>
-                      <video 
-                        src={videoStatus.videoUrl} 
-                        controls 
-                        className="w-full rounded-lg mb-2"
-                        style={{ maxHeight: '200px' }}
-                      />
-                      <p className="text-gray-400 text-xs">Duration: {videoStatus.duration || '~20'}s</p>
-                    </div>
-                  ) : null}
-                </div>
               </div>
             )}
           </motion.div>
