@@ -46,6 +46,17 @@ const META_APP = {
   redirectUri: `http://localhost:${PORT}/api/auth/facebook/callback`,
 };
 
+// HeyGen API Configuration
+const HEYGEN_API_KEY = process.env.HEYGEN_API_KEY;
+
+// YouTube OAuth (uses same Google OAuth client)
+const YOUTUBE_APP = {
+  clientId: process.env.GOOGLE_CLIENT_ID,
+  clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+  redirectUri: `http://localhost:${PORT}/api/auth/youtube/callback`,
+  scope: 'https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube',
+};
+
 // OpenAI API helper
 async function generateWithOpenAI(prompt, systemPrompt) {
   const response = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -142,6 +153,7 @@ app.get('/api/user/:userId/connections', (req, res) => {
     twitter: tokenStore.isConnected(userId, 'twitter'),
     facebook: tokenStore.isConnected(userId, 'facebook'),
     instagram: tokenStore.isConnected(userId, 'instagram'),
+    youtube: tokenStore.isConnected(userId, 'youtube'),
   };
   
   res.json({ success: true, connections });
@@ -651,6 +663,217 @@ Keep content between 200-400 words.`;
   }
 });
 
+// ==================== YOUTUBE OAUTH ====================
+
+// Start YouTube OAuth
+app.get('/api/auth/youtube', (req, res) => {
+  const { userId } = req.query;
+  
+  if (!userId) {
+    return res.status(400).json({ error: 'userId is required' });
+  }
+  
+  const state = crypto.randomBytes(16).toString('hex');
+  oauthStates.set(state, { userId, platform: 'youtube', timestamp: Date.now() });
+  
+  const authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
+  authUrl.searchParams.set('client_id', YOUTUBE_APP.clientId);
+  authUrl.searchParams.set('redirect_uri', YOUTUBE_APP.redirectUri);
+  authUrl.searchParams.set('response_type', 'code');
+  authUrl.searchParams.set('scope', YOUTUBE_APP.scope);
+  authUrl.searchParams.set('state', state);
+  authUrl.searchParams.set('access_type', 'offline');
+  authUrl.searchParams.set('prompt', 'consent');
+  
+  console.log(`🔗 YouTube OAuth started for user: ${userId}`);
+  res.redirect(authUrl.toString());
+});
+
+// YouTube OAuth Callback
+app.get('/api/auth/youtube/callback', async (req, res) => {
+  const { code, state, error } = req.query;
+  
+  if (error) {
+    console.error('❌ YouTube OAuth error:', error);
+    return res.redirect(`${FRONTEND_URL}/content-studio?error=${encodeURIComponent(error)}`);
+  }
+  
+  const stateData = oauthStates.get(state);
+  if (!stateData) {
+    return res.redirect(`${FRONTEND_URL}/content-studio?error=Invalid state`);
+  }
+  
+  oauthStates.delete(state);
+  const { userId } = stateData;
+  
+  try {
+    // Exchange code for tokens
+    const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        code,
+        client_id: YOUTUBE_APP.clientId,
+        client_secret: YOUTUBE_APP.clientSecret,
+        redirect_uri: YOUTUBE_APP.redirectUri,
+        grant_type: 'authorization_code',
+      }),
+    });
+    
+    const tokenData = await tokenResponse.json();
+    
+    if (tokenData.error) {
+      throw new Error(tokenData.error_description || tokenData.error);
+    }
+    
+    // Get channel info
+    const channelResponse = await fetch(
+      'https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true',
+      { headers: { 'Authorization': `Bearer ${tokenData.access_token}` } }
+    );
+    const channelData = await channelResponse.json();
+    const channel = channelData.items?.[0];
+    
+    tokenStore.set(userId, 'youtube', {
+      accessToken: tokenData.access_token,
+      refreshToken: tokenData.refresh_token,
+      expiresIn: tokenData.expires_in,
+      channelId: channel?.id,
+      channelName: channel?.snippet?.title,
+    });
+    
+    console.log(`✅ YouTube connected for user ${userId}: ${channel?.snippet?.title}`);
+    res.redirect(`${FRONTEND_URL}/content-studio?connected=youtube&name=${encodeURIComponent(channel?.snippet?.title || 'YouTube')}`);
+    
+  } catch (error) {
+    console.error('❌ YouTube token exchange error:', error.message);
+    res.redirect(`${FRONTEND_URL}/content-studio?error=${encodeURIComponent(error.message)}`);
+  }
+});
+
+// ==================== HEYGEN VIDEO GENERATION ====================
+
+// Generate video with HeyGen
+app.post('/api/heygen/generate', async (req, res) => {
+  try {
+    const { userId, content, avatarId = 'Kristin_public_2_20240108' } = req.body;
+    
+    if (!userId || !content) {
+      return res.status(400).json({ error: 'userId and content are required' });
+    }
+    
+    if (!HEYGEN_API_KEY) {
+      return res.status(500).json({ error: 'HeyGen API key not configured' });
+    }
+
+    console.log(`🎬 Generating HeyGen video for user ${userId}...`);
+    
+    // Create a short script (max 20 seconds = ~50 words)
+    const shortContent = content.split(' ').slice(0, 50).join(' ');
+    
+    // Create video with HeyGen API
+    const createResponse = await fetch('https://api.heygen.com/v2/video/generate', {
+      method: 'POST',
+      headers: {
+        'X-Api-Key': HEYGEN_API_KEY,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        video_inputs: [{
+          character: {
+            type: 'avatar',
+            avatar_id: avatarId,
+            avatar_style: 'normal',
+          },
+          voice: {
+            type: 'text',
+            input_text: shortContent,
+            voice_id: 'en-US-JennyNeural',
+          },
+        }],
+        dimension: { width: 1920, height: 1080 },
+        aspect_ratio: '16:9',
+      }),
+    });
+    
+    const createData = await createResponse.json();
+    
+    if (createData.error) {
+      throw new Error(createData.error.message || 'Failed to create video');
+    }
+    
+    const videoId = createData.data?.video_id;
+    console.log(`✅ HeyGen video created: ${videoId}`);
+    
+    res.json({
+      success: true,
+      videoId,
+      status: 'processing',
+      message: 'Video is being generated. Check status with /api/heygen/status/:videoId'
+    });
+    
+  } catch (error) {
+    console.error('❌ HeyGen error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Check HeyGen video status
+app.get('/api/heygen/status/:videoId', async (req, res) => {
+  try {
+    const { videoId } = req.params;
+    
+    if (!HEYGEN_API_KEY) {
+      return res.status(500).json({ error: 'HeyGen API key not configured' });
+    }
+    
+    const response = await fetch(`https://api.heygen.com/v1/video_status.get?video_id=${videoId}`, {
+      headers: { 'X-Api-Key': HEYGEN_API_KEY },
+    });
+    
+    const data = await response.json();
+    
+    if (data.error) {
+      throw new Error(data.error.message);
+    }
+    
+    res.json({
+      success: true,
+      status: data.data?.status,
+      videoUrl: data.data?.video_url,
+      duration: data.data?.duration,
+    });
+    
+  } catch (error) {
+    console.error('❌ HeyGen status error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get available HeyGen avatars
+app.get('/api/heygen/avatars', async (req, res) => {
+  try {
+    if (!HEYGEN_API_KEY) {
+      return res.status(500).json({ error: 'HeyGen API key not configured' });
+    }
+    
+    const response = await fetch('https://api.heygen.com/v2/avatars', {
+      headers: { 'X-Api-Key': HEYGEN_API_KEY },
+    });
+    
+    const data = await response.json();
+    
+    res.json({
+      success: true,
+      avatars: data.data?.avatars || [],
+    });
+    
+  } catch (error) {
+    console.error('❌ HeyGen avatars error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ==================== POSTING ENDPOINTS ====================
 
 // Post to LinkedIn
@@ -873,6 +1096,101 @@ app.post('/api/post/instagram', async (req, res) => {
   }
 });
 
+// Post to YouTube (with HeyGen video)
+app.post('/api/post/youtube', async (req, res) => {
+  try {
+    const { userId, content, videoUrl, title, description } = req.body;
+    
+    if (!userId) {
+      return res.status(400).json({ error: 'userId is required' });
+    }
+    
+    const tokens = tokenStore.get(userId, 'youtube');
+    if (!tokens || !tokens.accessToken) {
+      return res.status(401).json({ 
+        error: 'Not connected to YouTube',
+        needsAuth: true,
+        authUrl: `/api/auth/youtube?userId=${userId}`
+      });
+    }
+
+    if (!videoUrl) {
+      return res.status(400).json({ error: 'videoUrl is required. Generate a video first with HeyGen.' });
+    }
+
+    console.log(`📤 Uploading to YouTube for user ${userId}...`);
+
+    // Download video from HeyGen URL
+    const videoResponse = await fetch(videoUrl);
+    const videoBuffer = await videoResponse.buffer();
+    
+    // Create video metadata
+    const videoTitle = title || content.substring(0, 100);
+    const videoDescription = description || content;
+    
+    // Upload to YouTube using resumable upload
+    const metadataResponse = await fetch(
+      'https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status',
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${tokens.accessToken}`,
+          'Content-Type': 'application/json',
+          'X-Upload-Content-Type': 'video/mp4',
+          'X-Upload-Content-Length': videoBuffer.length,
+        },
+        body: JSON.stringify({
+          snippet: {
+            title: videoTitle,
+            description: videoDescription,
+            tags: ['AI2AIM', 'Marketing', 'AI Generated'],
+            categoryId: '22', // People & Blogs
+          },
+          status: {
+            privacyStatus: 'public',
+            selfDeclaredMadeForKids: false,
+          },
+        }),
+      }
+    );
+    
+    if (!metadataResponse.ok) {
+      const errorData = await metadataResponse.json();
+      throw new Error(errorData.error?.message || 'Failed to initialize upload');
+    }
+    
+    const uploadUrl = metadataResponse.headers.get('location');
+    
+    // Upload the actual video
+    const uploadResponse = await fetch(uploadUrl, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'video/mp4',
+        'Content-Length': videoBuffer.length,
+      },
+      body: videoBuffer,
+    });
+    
+    const uploadData = await uploadResponse.json();
+    
+    if (uploadData.error) {
+      throw new Error(uploadData.error.message);
+    }
+
+    console.log(`✅ Posted to YouTube: ${uploadData.id}`);
+    res.json({ 
+      success: true, 
+      postId: uploadData.id, 
+      url: `https://youtube.com/watch?v=${uploadData.id}`,
+      title: uploadData.snippet?.title,
+    });
+
+  } catch (error) {
+    console.error('❌ YouTube error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ==================== START SERVER ====================
 
 app.listen(PORT, () => {
@@ -888,16 +1206,23 @@ app.listen(PORT, () => {
   console.log(`   GET /api/auth/twitter?userId=XXX    → Twitter Login`);
   console.log(`   GET /api/auth/facebook?userId=XXX   → Facebook Login`);
   console.log(`   GET /api/auth/instagram?userId=XXX  → Instagram Login`);
+  console.log(`   GET /api/auth/youtube?userId=XXX    → YouTube Login`);
+  console.log('');
+  console.log('🎬 HeyGen Endpoints:');
+  console.log(`   POST /api/heygen/generate    { userId, content, avatarId }`);
+  console.log(`   GET  /api/heygen/status/:id  → Check video status`);
+  console.log(`   GET  /api/heygen/avatars     → List available avatars`);
   console.log('');
   console.log('📤 Posting Endpoints:');
   console.log(`   POST /api/post/linkedin   { userId, content }`);
   console.log(`   POST /api/post/twitter    { userId, content }`);
   console.log(`   POST /api/post/facebook   { userId, content }`);
   console.log(`   POST /api/post/instagram  { userId, content, mediaUrl }`);
+  console.log(`   POST /api/post/youtube    { userId, videoUrl, title, description }`);
   console.log('');
   console.log('✅ Google Sign-In configured!');
   console.log('✅ OpenAI GPT-4o-mini configured!');
+  console.log('✅ HeyGen Video Generation configured!');
   console.log('✅ Multi-user OAuth mode enabled!');
-  console.log('✅ Each user must connect their own accounts!');
   console.log('');
 });

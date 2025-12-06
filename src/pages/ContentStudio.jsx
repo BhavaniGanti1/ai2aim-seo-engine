@@ -45,7 +45,7 @@ const socialPlatforms = [
   { id: 'twitter', name: 'Twitter/X', icon: Twitter, color: '#1DA1F2', maxLength: 280 },
   { id: 'facebook', name: 'Facebook', icon: Facebook, color: '#1877F2' },
   { id: 'instagram', name: 'Instagram', icon: Instagram, color: '#E4405F', requiresMedia: true },
-  { id: 'youtube', name: 'YouTube', icon: Youtube, color: '#FF0000', comingSoon: true },
+  { id: 'youtube', name: 'YouTube', icon: Youtube, color: '#FF0000', requiresVideo: true },
   { id: 'medium', name: 'Medium', icon: FileText, color: '#00AB6C', comingSoon: true },
   { id: 'threads', name: 'Threads', icon: MessageSquare, color: '#000000', comingSoon: true },
   { id: 'reddit', name: 'Reddit', icon: Globe, color: '#FF4500', comingSoon: true },
@@ -85,6 +85,8 @@ function ContentStudio() {
   const [isLoadingConnections, setIsLoadingConnections] = useState(true)
   const [connectingPlatform, setConnectingPlatform] = useState(null)
   const [notification, setNotification] = useState(null)
+  const [videoStatus, setVideoStatus] = useState(null) // { status: 'idle' | 'generating' | 'ready' | 'error', videoId, videoUrl }
+  const [isGeneratingVideo, setIsGeneratingVideo] = useState(false)
 
   // Check for OAuth callback params
   useEffect(() => {
@@ -246,6 +248,83 @@ function ContentStudio() {
     }
   }
 
+  // Generate video with HeyGen
+  const handleGenerateVideo = async () => {
+    if (!generatedContent) return
+    
+    setIsGeneratingVideo(true)
+    setVideoStatus({ status: 'generating' })
+    
+    try {
+      const userId = localStorage.getItem('ai2aim_user') 
+        ? JSON.parse(localStorage.getItem('ai2aim_user')).id 
+        : 'demo_user'
+      
+      const response = await fetch('http://localhost:4000/api/heygen/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId,
+          content: generatedContent.content,
+        }),
+      })
+      
+      const data = await response.json()
+      
+      if (!data.success) {
+        throw new Error(data.error || 'Failed to generate video')
+      }
+      
+      // Start polling for video status
+      pollVideoStatus(data.videoId)
+      
+    } catch (error) {
+      setVideoStatus({ status: 'error', error: error.message })
+      setNotification({ type: 'error', message: `Video generation failed: ${error.message}` })
+      setIsGeneratingVideo(false)
+    }
+  }
+
+  // Poll HeyGen for video status
+  const pollVideoStatus = async (videoId) => {
+    const checkStatus = async () => {
+      try {
+        const response = await fetch(`http://localhost:4000/api/heygen/status/${videoId}`)
+        const data = await response.json()
+        
+        if (data.status === 'completed' && data.videoUrl) {
+          setVideoStatus({ status: 'ready', videoId, videoUrl: data.videoUrl, duration: data.duration })
+          setIsGeneratingVideo(false)
+          setNotification({ type: 'success', message: '🎬 Video generated successfully!' })
+          return true
+        } else if (data.status === 'failed') {
+          setVideoStatus({ status: 'error', error: 'Video generation failed' })
+          setIsGeneratingVideo(false)
+          return true
+        }
+        return false
+      } catch (error) {
+        console.error('Status check error:', error)
+        return false
+      }
+    }
+    
+    // Poll every 5 seconds for up to 5 minutes
+    let attempts = 0
+    const maxAttempts = 60
+    const pollInterval = setInterval(async () => {
+      attempts++
+      const done = await checkStatus()
+      if (done || attempts >= maxAttempts) {
+        clearInterval(pollInterval)
+        if (attempts >= maxAttempts && !done) {
+          setVideoStatus({ status: 'error', error: 'Video generation timed out' })
+          setIsGeneratingVideo(false)
+        }
+      }
+    }, 5000)
+  }
+
   const togglePlatform = (platformId) => {
     const platform = socialPlatforms.find(p => p.id === platformId)
     if (platform?.comingSoon) return
@@ -298,6 +377,53 @@ function ContentStudio() {
       
       try {
         setPublishResults(prev => ({ ...prev, [platformId]: { status: 'publishing' } }))
+        
+        // YouTube requires video URL from HeyGen
+        if (platformId === 'youtube') {
+          if (!videoStatus?.videoUrl) {
+            setPublishResults(prev => ({
+              ...prev,
+              [platformId]: { success: false, error: 'Generate a video first using HeyGen' }
+            }))
+            failedPosts++
+            continue
+          }
+          
+          // Post video to YouTube
+          const userId = localStorage.getItem('ai2aim_user') 
+            ? JSON.parse(localStorage.getItem('ai2aim_user')).id 
+            : 'demo_user'
+          
+          const response = await fetch('http://localhost:4000/api/post/youtube', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              userId,
+              videoUrl: videoStatus.videoUrl,
+              title: generatedContent.title,
+              description: generatedContent.content,
+            }),
+          })
+          
+          const result = await response.json()
+          
+          if (result.needsAuth) {
+            setPublishResults(prev => ({
+              ...prev,
+              [platformId]: { success: false, needsAuth: true, error: 'Please reconnect' }
+            }))
+            failedPosts++
+          } else if (result.success) {
+            setPublishResults(prev => ({
+              ...prev,
+              [platformId]: { success: true, ...result }
+            }))
+            successfulPosts++
+          } else {
+            throw new Error(result.error || 'Failed to upload to YouTube')
+          }
+          continue
+        }
         
         const result = await postToPlatform(platformId, generatedContent.content)
         
@@ -546,6 +672,58 @@ function ContentStudio() {
                   {generatedContent.keywords.map((keyword) => (
                     <span key={keyword} className="px-2 py-1 bg-neon-cyan/10 text-neon-cyan text-xs rounded-full">{keyword}</span>
                   ))}
+                </div>
+
+                {/* Video Generation Section */}
+                <div className="mt-4 p-4 bg-gradient-to-r from-red-500/10 to-orange-500/10 border border-red-500/30 rounded-xl">
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="flex items-center gap-2">
+                      <Youtube className="w-5 h-5 text-red-500" />
+                      <span className="text-white font-medium">AI Video (HeyGen)</span>
+                    </div>
+                    {videoStatus?.status === 'ready' && (
+                      <span className="text-xs text-neon-lime flex items-center gap-1">
+                        <CheckCircle className="w-3 h-3" /> Ready
+                      </span>
+                    )}
+                  </div>
+                  
+                  {!videoStatus || videoStatus.status === 'idle' || videoStatus.status === 'error' ? (
+                    <div>
+                      <p className="text-gray-400 text-sm mb-3">
+                        Generate a 20-second AI video to post on YouTube
+                      </p>
+                      <button
+                        onClick={handleGenerateVideo}
+                        disabled={isGeneratingVideo}
+                        className="w-full py-2 bg-gradient-to-r from-red-500 to-orange-500 rounded-lg text-white font-semibold text-sm disabled:opacity-50 flex items-center justify-center gap-2"
+                      >
+                        {isGeneratingVideo ? (
+                          <><Loader2 className="w-4 h-4 animate-spin" />Generating Video...</>
+                        ) : (
+                          <><Youtube className="w-4 h-4" />Generate Video with HeyGen</>
+                        )}
+                      </button>
+                      {videoStatus?.status === 'error' && (
+                        <p className="text-red-400 text-xs mt-2">{videoStatus.error}</p>
+                      )}
+                    </div>
+                  ) : videoStatus.status === 'generating' ? (
+                    <div className="text-center py-4">
+                      <Loader2 className="w-8 h-8 text-red-500 animate-spin mx-auto mb-2" />
+                      <p className="text-gray-400 text-sm">Generating video... This may take 1-2 minutes</p>
+                    </div>
+                  ) : videoStatus.status === 'ready' ? (
+                    <div>
+                      <video 
+                        src={videoStatus.videoUrl} 
+                        controls 
+                        className="w-full rounded-lg mb-2"
+                        style={{ maxHeight: '200px' }}
+                      />
+                      <p className="text-gray-400 text-xs">Duration: {videoStatus.duration || '~20'}s</p>
+                    </div>
+                  ) : null}
                 </div>
               </div>
             )}
